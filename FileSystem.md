@@ -90,6 +90,26 @@ mount -t nfs -o rw,sync server:/export /mountpoint
 #/etc/fstab
 SERVER:/EXPORT/ /mountpoint nfs rw,sync 0 0
 
+  
+## serverb 의 FS를 servera에서 사용
+# server 설정
+vim /etc/exports.d/public.exports
+/FS *(rw,no_root_squash)
+[root@serverb exports.d]# systemctl start nfs-server.service
+[root@serverb exports.d]# systemctl enable nfs-server.service
+# 방화벽 정책 설정
+[root@serverb exports.d]# firewall-cmd --add-service=nfs --permanent
+[root@serverb exports.d]# semanage fcontext -a -t 'public_content_rw_t' '/netstorage(/.*)?'
+[root@serverb netstorage]# restorecon -FRv /netstorage/
+[root@serverb exports.d]# chmod 2770 /netstorage
+[root@serverb netstorage]# exportfs -r
+
+# Client 설정
+[root@servera ~]# mount -t nfs serverb:/netstorage/test1 /mnt/manual
+[root@servera ~]# vim /etc/fstab
+serverb:/netstorage/test1       /mnt/manual     nfs     rw,sync 0       0
+
+
 ## Auto FS, Auto mount
 필요할때만 연결하여 자원 절약
 
@@ -100,7 +120,78 @@ SERVER:/EXPORT/ /mountpoint nfs rw,sync 0 0
   a. 1:1
   b. 와일드카드(다대다)
  
-# 마운트 설정 단계
-1. 마스터맵 생성(autofs 매핑 선언)
-2. 매핑파일 작성
+# NFS automounter(autofs) 구성단계
+1. 패키지 설치
+  dnf install autofs nfs-utils
+2. 마스터맵 작성(마운트 방식, 매핑파일 선언)
+  vim /etc/auto.master.d/MASTER_MAP_FILE.autofs
+3. 매핑파일 작성
+  vim /etc/auto.MAP_FILE_NAME
+3-1. (직접매핑의 경우에만) 로컬 마운트 포인트 생성
+  mkdir /mnt/docs
+4. 서비스 시작 및 화렁화(영구설정)
+  systemctl enable --now autofs
   
+## 직접매핑
+vim /etc/auto.master.d/direct.autofs
+  /-      /etc/auto.direct  (설정파일명)
+vim /etc/auto.direct
+  /mnt/direct     -rw,sync        serverb:/shares/management
+
+[root@servera ~]# systemctl start autofs.service
+[root@servera ~]# systemctl enable autofs.service
+# 위 두줄 = systemctl enable --now autofs 한줄로도 가능
+
+## 1:1 간접매핑
+# 마스터맵 작성
+[root@servera direct]# vim /etc/auto.master.d/indirect1.autofs
+  /mnt/indirect1  /etc/auto.indirect1
+# 매핑 파일 작성
+[root@servera direct]# vim /etc/auto.indirect1
+  operation	-rw,sync	serverb:/shares/operation
+  production	-rw,sync	serverb:/shares/production
+# 간접매핑은 별도로 마운트포인트 생성 안해도 된다.
+[root@servera direct]# systemctl restart autofs
+# 아직 operation이 없다.
+[root@servera mnt]# cd indirect1/
+[root@servera indirect1]# ls
+# /mnt/indirect1 까지만 마운트되어있다고 나온다
+[root@servera indirect1]# mount | grep mnt
+/etc/auto.direct on /mnt/direct type autofs (rw,relatime,fd=17,pgrp=1764,timeout=300,minproto=5,maxproto=5,direct,pipe_ino=27989)
+serverb:/shares/management on /mnt/direct type nfs4 (rw,relatime,sync,vers=4.2,rsize=262144,wsize=262144,namlen=255,hard,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=172.25.250.10,local_lock=none,addr=172.25.250.11)
+/etc/auto.indirect1 on /mnt/indirect1 type autofs (rw,relatime,fd=23,pgrp=1764,timeout=300,minproto=5,maxproto=5,indirect,pipe_ino=27997)
+
+# 없는데 들어가진다(최초에)
+[root@servera indirect1]# cd /mnt/indirect1/operation
+# 이제는 /mnt/indirect1/operation 까지 마운트 되어있다.
+[root@servera operation]# mount | grep mnt
+/etc/auto.direct on /mnt/direct type autofs (rw,relatime,fd=17,pgrp=1764,timeout=300,minproto=5,maxproto=5,direct,pipe_ino=27989)
+serverb:/shares/management on /mnt/direct type nfs4 (rw,relatime,sync,vers=4.2,rsize=262144,wsize=262144,namlen=255,hard,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=172.25.250.10,local_lock=none,addr=172.25.250.11)
+/etc/auto.indirect1 on /mnt/indirect1 type autofs (rw,relatime,fd=23,pgrp=1764,timeout=300,minproto=5,maxproto=5,indirect,pipe_ino=27997)
+serverb:/shares/operation on /mnt/indirect1/operation type nfs4 (rw,relatime,sync,vers=4.2,rsize=262144,wsize=262144,namlen=255,hard,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=172.25.250.10,local_lock=none,addr=172.25.250.11)
+
+
+## 와일드카드 간접매핑 -> 위처럼 일일히 다 지정하기 귀찮다.
+# 설정 초기화
+[root@servera auto.master.d]# mv * /etc/auto.master.d/tmp
+[root@servera auto.master.d]# systemctl restart autofs
+# 아무것도 없다.
+[root@servera auto.master.d]# mount | grep /mnt
+# 마스터맵 설정
+[root@servera auto.master.d]# vim /etc/auto.master.d/indirect.autofs
+/mnt/indirect   /etc/auto.indirect
+# 매핑파일 생성
+[root@servera auto.master.d]# vim /etc/auto.indirect
+*       -rw,sync        serverb:/shares/&
+[root@servera mnt]# systemctl restart autofs
+# /mnt/indirect 디렉토리 생김
+# 1:1 
+[root@servera mnt]# cd indirect
+[root@servera indirect]# ls
+
+[root@servera indirect]# mount | grep /mnt
+/etc/auto.indirect on /mnt/indirect type autofs (rw,relatime,fd=17,pgrp=1895,timeout=300,minproto=5,maxproto=5,indirect,pipe_ino=29409)
+[root@servera indirect]# cd operation
+[root@servera operation]# mount | grep /mnt
+/etc/auto.indirect on /mnt/indirect type autofs (rw,relatime,fd=17,pgrp=1895,timeout=300,minproto=5,maxproto=5,indirect,pipe_ino=29409)
+serverb:/shares/operation on /mnt/indirect/operation type nfs4 (rw,relatime,sync,vers=4.2,rsize=262144,wsize=262144,namlen=255,hard,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=172.25.250.10,local_lock=none,addr=172.25.250.11)
